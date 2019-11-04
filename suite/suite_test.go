@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/leiysky/go-util/assert"
+	"github.com/leiysky/go-utils/assert"
 )
 
 type suite struct {
