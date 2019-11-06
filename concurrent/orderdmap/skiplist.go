@@ -3,6 +3,8 @@ package orderedmap
 import (
 	"bytes"
 	"math/rand"
+	"sync/atomic"
+	"unsafe"
 )
 
 const maxLevel = 12
@@ -11,61 +13,104 @@ func randomLevel() int {
 	return rand.Intn(maxLevel)
 }
 
+type up = unsafe.Pointer
+
 type skipList struct {
-	next     []*node
-	curLevel int
+	head  *node
+	level int
+}
+
+func NewSkipList() Map {
+	return &skipList{
+		head:  &node{next: make([]*node, maxLevel)},
+		level: 0,
+	}
 }
 
 func (l *skipList) Get(key []byte) ([]byte, error) {
-	return nil, nil
+	itr := NewSkipListIterator(l)
+	itr.Seek(key)
+	if itr.Valid() && bytes.Equal(itr.Key(), key) {
+		return itr.Value(), nil
+	}
+	return nil, NotFoundErr
 }
 
-func (l *skipList) Put([]byte, []byte) error {
-	return nil
+func (l *skipList) Put(key []byte, value []byte) {
+	l.insert(key, value)
 }
 
-func (l *skipList) Del([]byte) {
+func (l *skipList) Del(key []byte) {
+	l.delete(key)
 }
 
 func (l *skipList) insert(key, value []byte) {
 	itr := NewSkipListIterator(l).(*skipListIterator)
 	itr.Seek(key)
-	if !itr.Valid() {
+	if itr.Valid() && bytes.Equal(itr.Key(), key) {
+		itr.get().value = value
 		return
 	}
 
-	cur := itr.get()
-	if bytes.Compare(itr.Key(), key) == 0 {
-		cur.value = value
-		return
-	}
-
-	next := cur.next
 	level := randomLevel()
-	node := &node{
-		next: make([]*node, level),
-		prev: make([]*node, level),
+	n := &node{
+		level: level,
+		next:  make([]*node, maxLevel),
+		key:   key,
+		value: value,
 	}
 
-	if level > l.curLevel {
-		for i := l.curLevel; i <= level; i++ {
+	if level > l.level {
+		l.level = level
+		l.head.level = level
+	}
 
+	x := l.head
+	for i := level; i >= 0; i-- {
+		for {
+			if next := (*node)(atomic.LoadPointer((*up)(up(&x.next[i])))); next != nil && bytes.Compare(next.key, n.key) < 0 {
+				x = next
+			} else {
+				break
+			}
 		}
+		n.next[i] = (*node)(atomic.LoadPointer((*up)(up(&x.next[i]))))
+		atomic.StorePointer((*up)(up(&x.next[i])), up(n))
+	}
+}
+
+func (l *skipList) delete(key []byte) {
+	itr := NewSkipListIterator(l)
+	itr.Seek(key)
+	if itr.Valid() && !bytes.Equal(itr.Key(), key) {
+		return
+	}
+	n := itr.(*skipListIterator).get()
+
+	x := l.head
+	for i := n.level; i >= 0; i-- {
+		for {
+			if next := (*node)(atomic.LoadPointer((*up)(up(&x.next[i])))); next != nil && bytes.Compare(next.key, n.key) < 0 {
+				x = next
+			} else {
+				break
+			}
+		}
+		atomic.StorePointer((*up)(up(&x.next[i].next[i])), up(x.next[i]))
 	}
 }
 
 type node struct {
+	level int
 	key   []byte
 	value []byte
 
-	prev []*node
 	next []*node
 }
 
 type skipListIterator struct {
-	isValid bool
-	cur     *node
-	list    *skipList
+	cur  *node
+	list *skipList
 }
 
 func NewSkipListIterator(m Map) Iterator {
@@ -76,41 +121,46 @@ func NewSkipListIterator(m Map) Iterator {
 
 	return &skipListIterator{
 		list: l,
+		cur:  l.head,
 	}
 }
 
 func (itr *skipListIterator) Valid() bool {
-	return itr.isValid
+	return itr.cur != nil && itr.cur != itr.list.head
 }
 
 func (itr *skipListIterator) Seek(key []byte) {
+	x := itr.list.head
 
-}
-
-func (itr *skipListIterator) Contains(key []byte) bool {
-	itr.Seek(key)
-	if itr.isValid {
-		if bytes.Compare(key, itr.Key()) == 0 {
-			return true
+	for i := itr.list.level; i >= 0; i-- {
+		for {
+			if next := (*node)(atomic.LoadPointer((*up)(up(&x.next[i])))); next != nil && bytes.Compare(next.key, key) <= 0 {
+				x = next
+			} else {
+				break
+			}
 		}
-		return false
 	}
-	return false
+
+	itr.cur = x
 }
 
 func (itr *skipListIterator) Next() {
-
+	if itr.cur == nil {
+		return
+	}
+	itr.cur = itr.cur.next[0]
 }
 
 func (itr *skipListIterator) Key() []byte {
-	if itr.isValid {
+	if itr.Valid() {
 		return itr.cur.key
 	}
 	return nil
 }
 
 func (itr *skipListIterator) Value() []byte {
-	if itr.isValid {
+	if itr.Valid() {
 		return itr.cur.value
 	}
 	return nil
